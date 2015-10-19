@@ -54,6 +54,9 @@ type EphemeralKey struct {
 //
 // Parameters:
 //     @path - Path in etcd namespace where the ephemeral key will be created.
+//
+// Return value:
+//     1. A pointer to EphemeralKey structure.
 func (ec *EtcdConnector) NewEphemeralKey(path string) *EphemeralKey {
 	ek := &EphemeralKey{
 		ec:      ec,
@@ -64,11 +67,18 @@ func (ec *EtcdConnector) NewEphemeralKey(path string) *EphemeralKey {
 }
 
 // Description:
-//     A routine that announces the existence of an ephemeral key by creating
+//     A routine that creates the existence of an ephemeral key by creating
 //     one at @keyPath specified. The routine also sets @val, passed by the
 //     user, as the value to the key and uses @interval as the time to renew
 //     the TTL of the key at regular intervals.
-func (se *EphemeralKey) Announce(val string, interval time.Duration) <-chan error {
+//
+// Parameters:
+//     @val      - User defined value that will be set for the ephemeral key.
+//     @interval - Interval at which the TTL will be renewed.
+//
+// Return value:
+//     1. A channel on which errors will be notified.
+func (se *EphemeralKey) Create(val string, interval time.Duration) <-chan error {
 	var ttl time.Duration
 	var ttlRefresh time.Duration
 
@@ -84,6 +94,10 @@ func (se *EphemeralKey) Announce(val string, interval time.Duration) <-chan erro
 		return errCh
 	}
 
+	//TODO: Currently, interval will be set to 0 to always pick the default
+	//      TTL values and will be removed once the "ComputeServerRTT" is done.
+	interval = 0
+
 	// If @interval is not passed in then default TTL and TTL_REFRESH values
 	// will be picked.
 	if interval == 0 {
@@ -91,10 +105,17 @@ func (se *EphemeralKey) Announce(val string, interval time.Duration) <-chan erro
 		ttlRefresh = TTL_REFRESH_TIMEOUT
 	} else {
 		ttl = interval
-		// If the interval is specified then pick a ttlRefresh interval that
-		// accounts the approximate worst case time needed for the HTTP request
-		// to reach the etcd cluster.
-		ttlRefresh = interval - (2 * time.Millisecond)
+
+		// If the interval specified is less than the RTT required to reach the
+		// etcd servers then set ttl to RTT + interval and the ttl refresh time
+		// to the original interval passed in.
+		if ttl <= se.ec.serverRTT {
+			ttlRefresh = ttl
+			ttl += se.ec.serverRTT
+		} else {
+			// Else set the ttl refresh time to ttl - RTT.
+			ttlRefresh = ttl - se.ec.serverRTT
+		}
 	}
 
 	// Since we are announcing the presence of the ephemeral key for the first
@@ -112,7 +133,7 @@ func (se *EphemeralKey) Announce(val string, interval time.Duration) <-chan erro
 }
 
 // Description:
-//     A routine to stops the EphemeralKey instance. Once stopped an attempt
+//     A routine that deletes the EphemeralKey instance. Once stopped an attempt
 //     will be made to manually delete the ephemeral key from etcd namespace.
 //     The deletion is handled by the RenewTTL helper routine.
 //
@@ -121,7 +142,7 @@ func (se *EphemeralKey) Announce(val string, interval time.Duration) <-chan erro
 //
 // Return value:
 //     None
-func (se *EphemeralKey) Stop() {
+func (se *EphemeralKey) Delete() {
 	// Call cancel if it's setup.
 	if se.cancel != nil {
 		se.cancel()

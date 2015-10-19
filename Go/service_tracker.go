@@ -61,7 +61,7 @@ type TrackerData struct {
 	Pairs []Pair
 
 	// Error information, if any.
-	err error
+	Err error
 }
 
 // Description:
@@ -72,7 +72,7 @@ type TrackerData struct {
 //             be tracked.
 //
 // Return value:
-//     @st - A pointer to the ServiceTracker instance.
+//     1. A pointer to the ServiceTracker instance.
 func (ec *EtcdConnector) NewServiceTracker(path string) *ServiceTracker {
 	st := &ServiceTracker{
 		ec:          ec,
@@ -93,7 +93,7 @@ func (ec *EtcdConnector) NewServiceTracker(path string) *ServiceTracker {
 //     None
 //
 // Return value:
-//
+//     1. A channel on which TrackerData will be notified.
 func (st *ServiceTracker) Start() <-chan TrackerData {
 	// Create an outward channel on which service tracker info will be sent.
 	tracker := make(chan TrackerData, 2)
@@ -101,7 +101,7 @@ func (st *ServiceTracker) Start() <-chan TrackerData {
 	// Start the Observer.
 	obResp, err := st.obsvr.Start(0, true)
 	if err != nil {
-		tracker <- TrackerData{Pairs: nil, err: err}
+		tracker <- TrackerData{Pairs: nil, Err: err}
 		close(tracker)
 		return tracker
 	}
@@ -117,8 +117,8 @@ func (st *ServiceTracker) Start() <-chan TrackerData {
 
 			// If any error, report it back to the caller. Rely on the caller
 			// to handle the error appropriately.
-			if or.err != nil {
-				tracker <- TrackerData{Pairs: nil, err: or.err}
+			if or.Err != nil {
+				tracker <- TrackerData{Pairs: nil, Err: or.Err}
 				continue
 			}
 
@@ -127,7 +127,7 @@ func (st *ServiceTracker) Start() <-chan TrackerData {
 			// Get the latest contents of @servicePath directory.
 			r, e := st.ec.Get(context.Background(), st.servicePath, opts)
 			if e != nil {
-				tracker <- TrackerData{Pairs: nil, err: e}
+				tracker <- TrackerData{Pairs: nil, Err: e}
 				continue
 			}
 
@@ -156,7 +156,7 @@ func (st *ServiceTracker) Start() <-chan TrackerData {
 
 			// if anything has changed then send the new pairs to the caller.
 			if updated == true {
-				tracker <- TrackerData{Pairs: curKeyVals, err: nil}
+				tracker <- TrackerData{Pairs: curKeyVals, Err: nil}
 			}
 		}
 

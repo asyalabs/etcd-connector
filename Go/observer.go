@@ -50,14 +50,14 @@ type Observer struct {
 	cancel context.CancelFunc
 }
 
-// A wrapper structure that will be sent back to user as a response whenever
+// A wrapper structure that will be sent back to caller as a response whenever
 // a watch triggers or an error occurs.
 type ObserverResponse struct {
 	// An etcd response object received when a watch triggers.
 	Response *client.Response
 
 	// An error object, if any.
-	err error
+	Err error
 }
 
 // Description:
@@ -68,7 +68,7 @@ type ObserverResponse struct {
 //            directory or a key.
 //
 // Return value:
-//     @obsvr - A pointer to an Observer structure.
+//     1. A pointer to an Observer structure.
 func (ec *EtcdConnector) NewObserver(key string) *Observer {
 	obsvr := &Observer{
 		ec:     ec,
@@ -91,8 +91,8 @@ func (ec *EtcdConnector) NewObserver(key string) *Observer {
 //                  directory structure.
 //
 // Return values:
-//     @resp - A channel object on which responses will be sent.
-//     @err  - Error info, if any while starting the operation, will be returned.
+//     1. A channel on which responses will be sent.
+//     2. Error info, if any while starting the operation, will be returned.
 func (o *Observer) Start(waitIndex uint64, recursive bool) (<-chan ObserverResponse, error) {
 	// Create an outward channel on which responses will be sent.
 	resp := make(chan ObserverResponse)
@@ -129,12 +129,12 @@ func (o *Observer) Start(waitIndex uint64, recursive bool) (<-chan ObserverRespo
 					// On any other error send the information back to caller. The
 					// onus is on the caller to determine the action (can stop the
 					// observation if the error is catastrophic).
-					resp <- ObserverResponse{Response: nil, err: e}
+					resp <- ObserverResponse{Response: nil, Err: e}
 				}
 			} else {
 				// If indeed there is any change detected, send the etcd Response
 				// back to the caller.
-				resp <- ObserverResponse{Response: r, err: nil}
+				resp <- ObserverResponse{Response: r, Err: nil}
 			}
 		}
 	}()
