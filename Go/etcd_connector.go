@@ -47,6 +47,9 @@ type EtcdConnector struct {
 
 	// Namespace identifier. All keys will be created under this directory.
 	name string
+
+	// RTT required to reach the Etcd servers.
+	serverRTT time.Duration
 }
 
 const (
@@ -58,7 +61,7 @@ const (
 	TTL_VAL = (10 * time.Second)
 
 	// Default ticker value that will be used to refresh the TTL.
-	TTL_REFRESH_TIMEOUT = (TTL_VAL - (2 * time.Millisecond))
+	TTL_REFRESH_TIMEOUT = (TTL_VAL - (1 * time.Second))
 )
 
 // Description:
@@ -73,13 +76,8 @@ const (
 //                created then 'hosts' would be present at '/abc/hosts'.
 //
 // Return values:
-//   On Success,
-//     @ec  - A pointer to an instance of the EtcdConnector structure.
-//     @err - nil.
-//
-//   On failure,
-//     @ec  - nil.
-//     @err - Error object describing the error.
+//     1. A pointer to an EtcdConnector structure on success, nil otherwise.
+//     2. An error object on failure, nil otherise.
 func NewEtcdConnector(servers []string, name string) (*EtcdConnector, error) {
 	var err error
 	ec := &EtcdConnector{
@@ -114,7 +112,7 @@ func NewEtcdConnector(servers []string, name string) (*EtcdConnector, error) {
 //     @port - Port at which the servers will accept client connections.
 //
 // Return value:
-//     @epList - an array of strings in 'http://<server>:<port>' format.
+//     1. An array of strings in 'http://<server>:<port>' format.
 func PrepareEndpointList(srvs []string, port int) []string {
 	if len(srvs) == 0 {
 		return nil
@@ -137,10 +135,29 @@ func PrepareEndpointList(srvs []string, port int) []string {
 //     @key - A key to be created.
 //
 // Return value:
-//     @path - A string that takes following form: /@EtcdConnector.name/@dir/@key
+//     1. A string that takes following form: /@EtcdConnector.name/@dir/@key
 func (ec *EtcdConnector) ConstructPath(dir string, key string) string {
 	path := ec.name + dir + "/" + key
 	return path
+}
+
+// Description:
+//     A helper routine to approximate the time required for a request to reach
+//     one of the etcd servers. This needs to be accounted as it will be crucial
+//     for picking up a time interval to update the TTL of a key.
+//
+//     At the end of this routine the approximate RTT value will be stored in the
+//     EtcdConnector structure.
+//
+// Parameters:
+//     None
+//
+// Return value:
+//     1. Corresponding error object, if any.
+func (ec *EtcdConnector) ComputeServerRTT() error {
+	// TODO
+	// We have discussed to use the ping times to determine the RTT.
+	return nil
 }
 
 // Description:
@@ -155,7 +172,7 @@ func (ec *EtcdConnector) ConstructPath(dir string, key string) string {
 //     @refresh - Interval, in seconds, at which the TTL will be renewed.
 //
 // Return value:
-//     @out - A channel on which errors will be reported back to the caller.
+//     1. A channel on which errors will be reported back to the caller.
 func (ec *EtcdConnector) RenewTTL(ctx context.Context, key, val string, ttl, refresh time.Duration) <-chan error {
 	out := make(chan error)
 
