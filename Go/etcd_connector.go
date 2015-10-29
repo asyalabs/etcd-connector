@@ -16,6 +16,7 @@ package etcd_recipes
 
 import (
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/coreos/etcd/Godeps/_workspace/src/golang.org/x/net/context"
@@ -173,11 +174,14 @@ func (ec *EtcdConnector) ComputeServerRTT() error {
 //
 // Return value:
 //     1. A channel on which errors will be reported back to the caller.
-func (ec *EtcdConnector) RenewTTL(ctx context.Context, key, val string, ttl, refresh time.Duration) <-chan error {
+func (ec *EtcdConnector) RenewTTL(ctx context.Context, wg *sync.WaitGroup, key, val string, ttl, refresh time.Duration) <-chan error {
 	out := make(chan error)
 
 	// Start a ticker to trigger at every @refresh seconds.
 	ticker := time.NewTicker(refresh)
+
+	// Account for the go-routine in the WaitGroup
+	wg.Add(1)
 
 	// Launch a go routine to handle the periodic TTL renewal of @key.
 	go func() {
@@ -211,6 +215,7 @@ func (ec *EtcdConnector) RenewTTL(ctx context.Context, key, val string, ttl, ref
 				// delete can also fail.
 				ec.Delete(context.Background(), key, &client.DeleteOptions{})
 				close(out)
+				wg.Done()
 				return
 			}
 		}

@@ -16,6 +16,7 @@ package etcd_recipes
 
 import (
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/coreos/etcd/Godeps/_workspace/src/golang.org/x/net/context"
@@ -47,6 +48,15 @@ type EphemeralKey struct {
 
 	// Function to call to initiate the cancellation.
 	cancel context.CancelFunc
+
+	// TTL value.
+	ttl time.Duration
+
+	// TTL Refresh value.
+	ttlRefresh time.Duration
+
+	// WaitGroup to make sure that the go-routine has really exited.
+	wg *sync.WaitGroup
 }
 
 // Description:
@@ -62,6 +72,7 @@ func (ec *EtcdConnector) NewEphemeralKey(path string) *EphemeralKey {
 		ec:      ec,
 		keyPath: path,
 		ticker:  nil,
+		wg:      &sync.WaitGroup{},
 	}
 	return ek
 }
@@ -77,21 +88,14 @@ func (ec *EtcdConnector) NewEphemeralKey(path string) *EphemeralKey {
 //     @interval - Interval at which the TTL will be renewed.
 //
 // Return value:
-//     1. A channel on which errors will be notified.
-func (se *EphemeralKey) Create(val string, interval time.Duration) <-chan error {
-	var ttl time.Duration
-	var ttlRefresh time.Duration
-
-	// Create an error channel on which errors will be reported to the user.
-	errCh := make(chan error, 2)
-
+//     1. A channel on which errors that occur during TTL renewal will be notified.
+//     2. Error object describing the error, if any, that occurs during initial setup.
+func (ek *EphemeralKey) Create(val string, interval time.Duration) (<-chan error, error) {
 	// Setup a context with cancellation capability. This will be used to stop
 	// the EphemeralKey instance.
-	se.ctx, se.cancel = context.WithCancel(context.Background())
-	if se.ctx == nil || se.cancel == nil {
-		errCh <- errors.New("Couldn't instantiate context/cancel objects")
-		close(errCh)
-		return errCh
+	ek.ctx, ek.cancel = context.WithCancel(context.Background())
+	if ek.ctx == nil || ek.cancel == nil {
+		return nil, errors.New("Couldn't instantiate context/cancel objects")
 	}
 
 	//TODO: Currently, interval will be set to 0 to always pick the default
@@ -101,35 +105,57 @@ func (se *EphemeralKey) Create(val string, interval time.Duration) <-chan error 
 	// If @interval is not passed in then default TTL and TTL_REFRESH values
 	// will be picked.
 	if interval == 0 {
-		ttl = TTL_VAL
-		ttlRefresh = TTL_REFRESH_TIMEOUT
+		ek.ttl = TTL_VAL
+		ek.ttlRefresh = TTL_REFRESH_TIMEOUT
 	} else {
-		ttl = interval
+		ek.ttl = interval
 
 		// If the interval specified is less than the RTT required to reach the
 		// etcd servers then set ttl to RTT + interval and the ttl refresh time
 		// to the original interval passed in.
-		if ttl <= se.ec.serverRTT {
-			ttlRefresh = ttl
-			ttl += se.ec.serverRTT
+		if ek.ttl <= ek.ec.serverRTT {
+			ek.ttlRefresh = ek.ttl
+			ek.ttl += ek.ec.serverRTT
 		} else {
 			// Else set the ttl refresh time to ttl - RTT.
-			ttlRefresh = ttl - se.ec.serverRTT
+			ek.ttlRefresh = ek.ttl - ek.ec.serverRTT
 		}
 	}
 
 	// Since we are announcing the presence of the ephemeral key for the first
 	// time set the PrevExist flag to false.
-	opts := &client.SetOptions{PrevExist: client.PrevNoExist, TTL: ttl}
-	_, err := se.ec.Set(se.ctx, se.keyPath, val, opts)
+	opts := &client.SetOptions{PrevExist: client.PrevNoExist, TTL: ek.ttl}
+	_, err := ek.ec.Set(ek.ctx, ek.keyPath, val, opts)
 	if err != nil {
-		errCh <- err
-		close(errCh)
-		return errCh
+		return nil, err
 	}
 
 	// Call the helper routine to periodically renew the TTL of the key.
-	return se.ec.RenewTTL(se.ctx, se.keyPath, val, ttl, ttlRefresh)
+	errCh := ek.ec.RenewTTL(ek.ctx, ek.wg, ek.keyPath, val, ek.ttl, ek.ttlRefresh)
+	return errCh, nil
+}
+
+// Description:
+//     A routine that updates the value stored in the ephemeral key. It also
+//     sets the TTL to an already determined value (in the call to Create).
+//
+// Parameters:
+//     @newVal - A new user defined value that will be set for the ephemeral key.
+//
+// Return value:
+//     1. Error object describing the error.
+func (ek *EphemeralKey) Update(newVal string) error {
+	// Make sure that the ephemral key is already created.
+	if ek.cancel == nil {
+		return errors.New("Update cannot be called before Create!")
+	}
+
+	// Set the options with PrevExist and @ek.ttl value.
+	opts := &client.SetOptions{PrevExist: client.PrevExist, TTL: ek.ttl}
+
+	// Update the ephemeral key's value.
+	_, err := ek.ec.Set(context.Background(), ek.keyPath, newVal, opts)
+	return err
 }
 
 // Description:
@@ -142,9 +168,10 @@ func (se *EphemeralKey) Create(val string, interval time.Duration) <-chan error 
 //
 // Return value:
 //     None
-func (se *EphemeralKey) Delete() {
+func (ek *EphemeralKey) Delete() {
 	// Call cancel if it's setup.
-	if se.cancel != nil {
-		se.cancel()
+	if ek.cancel != nil {
+		ek.cancel()
+		ek.wg.Wait()
 	}
 }

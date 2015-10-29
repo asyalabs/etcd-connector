@@ -17,6 +17,7 @@ package etcd_recipes
 import (
 	"errors"
 	"strings"
+	"sync"
 
 	"github.com/coreos/etcd/Godeps/_workspace/src/golang.org/x/net/context"
 	"github.com/coreos/etcd/client"
@@ -48,6 +49,9 @@ type Observer struct {
 
 	// Function to call to initiate the cancellation.
 	cancel context.CancelFunc
+
+	// WaitGroup instance used to wait for the go-routine to exit.
+	wg *sync.WaitGroup
 }
 
 // A wrapper structure that will be sent back to caller as a response whenever
@@ -75,6 +79,7 @@ func (ec *EtcdConnector) NewObserver(key string) *Observer {
 		key:    key,
 		ctx:    nil,
 		cancel: nil,
+		wg:     &sync.WaitGroup{},
 	}
 	return obsvr
 }
@@ -115,6 +120,9 @@ func (o *Observer) Start(waitIndex uint64, recursive bool) (<-chan ObserverRespo
 		return nil, err
 	}
 
+	// Account for the go-routine in WaitGroup.
+	o.wg.Add(1)
+
 	// Trigger the watch in a go routine.
 	go func() {
 		for {
@@ -124,6 +132,7 @@ func (o *Observer) Start(waitIndex uint64, recursive bool) (<-chan ObserverRespo
 				// has asked to stop. Close the outward channel and return.
 				if strings.Contains(e.Error(), "context canceled") {
 					close(resp)
+					o.wg.Done()
 					return
 				} else {
 					// On any other error send the information back to caller. The
@@ -156,5 +165,8 @@ func (o *Observer) Stop() {
 	// Call cancel if it's setup.
 	if o.cancel != nil {
 		o.cancel()
+
+		// Wait for the go-routine to exit completely.
+		o.wg.Wait()
 	}
 }

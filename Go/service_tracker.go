@@ -15,6 +15,8 @@
 package etcd_recipes
 
 import (
+	"sync"
+
 	"github.com/coreos/etcd/Godeps/_workspace/src/golang.org/x/net/context"
 	"github.com/coreos/etcd/client"
 )
@@ -46,6 +48,9 @@ type ServiceTracker struct {
 
 	// Observer instance to monitor the changes.
 	obsvr *Observer
+
+	// WaitGroup instance used to wait for the go-routine to exit.
+	wg *sync.WaitGroup
 }
 
 // A structure that describes a key-value pair.
@@ -78,6 +83,7 @@ func (ec *EtcdConnector) NewServiceTracker(path string) *ServiceTracker {
 		ec:          ec,
 		servicePath: path,
 		obsvr:       ec.NewObserver(path),
+		wg:          &sync.WaitGroup{},
 	}
 	return st
 }
@@ -94,20 +100,22 @@ func (ec *EtcdConnector) NewServiceTracker(path string) *ServiceTracker {
 //
 // Return value:
 //     1. A channel on which TrackerData will be notified.
-func (st *ServiceTracker) Start() <-chan TrackerData {
+func (st *ServiceTracker) Start() (<-chan TrackerData, error) {
 	// Create an outward channel on which service tracker info will be sent.
 	tracker := make(chan TrackerData, 2)
 
 	// Start the Observer.
 	obResp, err := st.obsvr.Start(0, true)
 	if err != nil {
-		tracker <- TrackerData{Pairs: nil, Err: err}
 		close(tracker)
-		return tracker
+		return nil, err
 	}
 
 	var curKeyVals []Pair
 	opts := &client.GetOptions{Sort: true, Recursive: true}
+
+	// Account for the go-routine in WaitGroup.
+	st.wg.Add(1)
 
 	// Observe the changes in a go routine.
 	go func() {
@@ -162,9 +170,12 @@ func (st *ServiceTracker) Start() <-chan TrackerData {
 
 		// If the observer channel is closed then close the tracker channel too.
 		close(tracker)
+
+		// Adjust the WaitGroup counter before exiting the go-routine.
+		st.wg.Done()
 	}()
 
-	return tracker
+	return tracker, nil
 }
 
 // Description:
@@ -177,4 +188,5 @@ func (st *ServiceTracker) Start() <-chan TrackerData {
 //     None
 func (st *ServiceTracker) Stop() {
 	st.obsvr.Stop()
+	st.wg.Wait()
 }

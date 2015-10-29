@@ -16,6 +16,7 @@ package etcd_recipes
 
 import (
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/coreos/etcd/Godeps/_workspace/src/golang.org/x/net/context"
@@ -62,6 +63,9 @@ type LeaderElector struct {
 
 	// Function to call to initiate cancellation.
 	cancel context.CancelFunc
+
+	// WaitGroup instance used to wait for the go-routine to exit.
+	wg *sync.WaitGroup
 }
 
 // A type to describe the status of the leader election operation.
@@ -126,6 +130,7 @@ func (ec *EtcdConnector) NewLeaderElector(key, val string, interval time.Duratio
 		ttlRenew: ttlRenew,
 		ctx:      nil,
 		cancel:   nil,
+		wg:       &sync.WaitGroup{},
 	}
 }
 
@@ -206,11 +211,12 @@ func (le *LeaderElector) waitForLeadership(waitIndex uint64) (*client.Response, 
 //     None
 // Return value:
 //     1. A channel on which ElectionResponse will be notified.
-func (le *LeaderElector) Start() <-chan ElectionResponse {
+//     2. Error object describing the error, if any, that occurs during initial setup.
+func (le *LeaderElector) Start() (<-chan ElectionResponse, error) {
 	var waitIndex uint64 = 0
 
 	// Create a channel that carries ElectionResponse objects.
-	out := make(chan ElectionResponse, 2)
+	out := make(chan ElectionResponse)
 
 	// The following channels are used to run the leader election
 	// state machine.
@@ -221,13 +227,12 @@ func (le *LeaderElector) Start() <-chan ElectionResponse {
 	// the leader election operation.
 	le.ctx, le.cancel = context.WithCancel(context.Background())
 	if le.ctx == nil || le.cancel == nil {
-		out <- ElectionResponse{
-			Status: LEStatusUnknown,
-			Err:    errors.New("Couldn't instantiate context/cancel objects"),
-		}
 		close(out)
-		return out
+		return nil, errors.New("Couldn't instantiate context/cancel objects")
 	}
+
+	// Account for the go-routine in WaitGroup.
+	le.wg.Add(1)
 
 	go func() {
 		for {
@@ -237,6 +242,9 @@ func (le *LeaderElector) Start() <-chan ElectionResponse {
 				// So stop the Observer, close the outward channel ans return.
 				le.obsvr.Stop()
 				close(out)
+
+				// Adjust the WaitGroup counter before returning.
+				le.wg.Done()
 				return
 			case <-await:
 				// Lost the race to get elected, so wait for leadership.
@@ -257,7 +265,7 @@ func (le *LeaderElector) Start() <-chan ElectionResponse {
 				// We get here if the attempt to acquire leadership was successful.
 				// Now renew the TTL at regular intervals to retain the leadership
 				// until the caller relinquishes leadership.
-				errChan := le.ec.RenewTTL(le.ctx, le.keyPath, le.value, le.ttl, le.ttlRenew)
+				errChan := le.ec.RenewTTL(le.ctx, le.wg, le.keyPath, le.value, le.ttl, le.ttlRenew)
 				for e := range errChan {
 					// If any error occurred while renewing the TTl then it must
 					// be catastrophic. Inform the caller about the issue, sleep
@@ -294,7 +302,7 @@ func (le *LeaderElector) Start() <-chan ElectionResponse {
 		}
 	}()
 
-	return out
+	return out, nil
 }
 
 // Description:
@@ -308,5 +316,6 @@ func (le *LeaderElector) Start() <-chan ElectionResponse {
 func (le *LeaderElector) Stop() {
 	if le.cancel != nil {
 		le.cancel()
+		le.wg.Wait()
 	}
 }
