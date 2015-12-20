@@ -40,6 +40,12 @@ type EphemeralKey struct {
 	// Path at which the ephemeral key will be created.
 	keyPath string
 
+	// Value that is associated with the key.
+	value string
+
+	// Channel through which updates to value will be sent.
+	updateCh chan string
+
 	// A ticker object to periodically renew the TTL.
 	ticker *time.Ticker
 
@@ -69,18 +75,19 @@ type EphemeralKey struct {
 //     1. A pointer to EphemeralKey structure.
 func (ec *EtcdConnector) NewEphemeralKey(path string) *EphemeralKey {
 	ek := &EphemeralKey{
-		ec:      ec,
-		keyPath: path,
-		ticker:  nil,
-		wg:      &sync.WaitGroup{},
+		ec:       ec,
+		keyPath:  path,
+		ticker:   nil,
+		updateCh: make(chan string),
+		wg:       &sync.WaitGroup{},
 	}
 	return ek
 }
 
 // Description:
-//     A routine that creates the existence of an ephemeral key by creating
-//     one at @keyPath specified. The routine also sets @val, passed by the
-//     user, as the value to the key and uses @interval as the time to renew
+//     A routine that instantiates an ephemeral key by creating one at
+//     @keyPath specified. The routine also sets @val, passed by the user,
+//     as the value to the key and uses @interval as the time to renew
 //     the TTL of the key at regular intervals.
 //
 // Parameters:
@@ -122,22 +129,83 @@ func (ek *EphemeralKey) Create(val string, interval time.Duration) (<-chan error
 		}
 	}
 
+	// Store the value.
+	ek.value = val
+
 	// Since we are announcing the presence of the ephemeral key for the first
 	// time set the PrevExist flag to false.
 	opts := &client.SetOptions{PrevExist: client.PrevNoExist, TTL: ek.ttl}
-	_, err := ek.ec.Set(ek.ctx, ek.keyPath, val, opts)
+	_, err := ek.ec.Set(ek.ctx, ek.keyPath, ek.value, opts)
 	if err != nil {
 		return nil, err
 	}
 
-	// Call the helper routine to periodically renew the TTL of the key.
-	errCh := ek.ec.RenewTTL(ek.ctx, ek.wg, ek.keyPath, val, ek.ttl, ek.ttlRefresh)
+	errCh := make(chan error)
+
+	// Start a ticker to trigger at every @refresh seconds.
+	ticker := time.NewTicker(ek.ttlRefresh)
+
+	// Account for the go-routine in the WaitGroup
+	ek.wg.Add(1)
+
+	// Launch a go routine to handle the periodic TTL renewal of @keyPath.
+	go func() {
+		// Since we will either update the value or renew the TTL set the
+		// PrevExist flag to true.
+		opts = &client.SetOptions{PrevExist: client.PrevExist, TTL: ek.ttl}
+
+		// Wait for activity either on the ticker channel or @ctx's channel.
+		for {
+			select {
+			case <-ticker.C:
+				// Update the TTL of @keyPath.
+				_, err = ek.ec.Set(ek.ctx, ek.keyPath, ek.value, opts)
+				if err != nil {
+					// In case of an error, put out the error info on the
+					// outward channel and return.
+					errCh <- err
+					close(errCh)
+					return
+				}
+			case ek.value = <-ek.updateCh:
+				// Update the value string and TTL of @keyPath.
+				_, err = ek.ec.Set(ek.ctx, ek.keyPath, ek.value, opts)
+				if err != nil {
+					// In case of an error, put out the error info on the
+					// outward channel and return.
+					errCh <- err
+					close(errCh)
+					return
+				}
+			case <-ek.ctx.Done():
+				// If we are here then it's indication by the caller to stop the
+				// renewal operation. So kill the ticker, delete @key, close the
+				// outward channel and return.
+				ticker.Stop()
+
+				// Deletion is best effort here and also an optimization. We end
+				// up here only when the program is being shutdown or when a
+				// catastrophic failure occurs. If we succeed in deleting @keyPath
+				// then entities watching @keyPath will get notified quickly or else
+				// they'll have to wait for the TTL to expire. But if we get here
+				// because of catastrophic failure then it's a best effort as the
+				// delete can also fail.
+				ek.ec.Delete(context.Background(), ek.keyPath, &client.DeleteOptions{})
+				close(errCh)
+				ek.wg.Done()
+				return
+			}
+		}
+	}()
+
 	return errCh, nil
 }
 
 // Description:
-//     A routine that updates the value stored in the ephemeral key. It also
-//     sets the TTL to an already determined value (in the call to Create).
+//     A routine that updates the value stored in the ephemeral key. It's done by
+//     sending the new value on the @updateCh channel which will be read by the
+//     go-routine created by the Create API. As a side effect the TTL also gets
+//     renewed.
 //
 // Parameters:
 //     @newVal - A new user defined value that will be set for the ephemeral key.
@@ -150,18 +218,15 @@ func (ek *EphemeralKey) Update(newVal string) error {
 		return errors.New("Update cannot be called before Create!")
 	}
 
-	// Set the options with PrevExist and @ek.ttl value.
-	opts := &client.SetOptions{PrevExist: client.PrevExist, TTL: ek.ttl}
-
-	// Update the ephemeral key's value.
-	_, err := ek.ec.Set(context.Background(), ek.keyPath, newVal, opts)
-	return err
+	// Send the new value on the update channel.
+	ek.updateCh <- newVal
+	return nil
 }
 
 // Description:
 //     A routine that deletes the EphemeralKey instance. Once stopped an attempt
 //     will be made to manually delete the ephemeral key from etcd namespace.
-//     The deletion is handled by the RenewTTL helper routine.
+//     The deletion is attempted by the go-routine created in Create API.
 //
 // Parameters:
 //     None
