@@ -1,4 +1,4 @@
-// Copyright 2015 Asya Labs
+// Copyright 2016 Asya Labs
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,10 +16,8 @@ package etcd_recipes
 
 import (
 	"fmt"
-	"sync"
 	"time"
 
-	"github.com/coreos/etcd/Godeps/_workspace/src/golang.org/x/net/context"
 	"github.com/coreos/etcd/client"
 )
 
@@ -156,70 +154,6 @@ func (ec *EtcdConnector) ConstructPath(dir string, key string) string {
 // Return value:
 //     1. Corresponding error object, if any.
 func (ec *EtcdConnector) ComputeServerRTT() error {
-	// TODO
-	// We have discussed to use the ping times to determine the RTT.
+	// TODO - use the ping times to determine the RTT.
 	return nil
-}
-
-// Description:
-//     A helper routine to renew the TTL of o given key. This routine starts a
-//     timer and at every tick attempts to renew the TTL of the given key.
-//
-// Parameters:
-//     @ctx     - A context object used to stop the renewal operation.
-//     @key     - The key for which the TTL needs to be renewed.
-//     @val     - The value associated with the key.
-//     @ttl     - TTL value in seconds.
-//     @refresh - Interval, in seconds, at which the TTL will be renewed.
-//
-// Return value:
-//     1. A channel on which errors will be reported back to the caller.
-func (ec *EtcdConnector) RenewTTL(ctx context.Context, wg *sync.WaitGroup, key, val string, ttl, refresh time.Duration) <-chan error {
-	out := make(chan error)
-
-	// Start a ticker to trigger at every @refresh seconds.
-	ticker := time.NewTicker(refresh)
-
-	// Account for the go-routine in the WaitGroup
-	wg.Add(1)
-
-	// Launch a go routine to handle the periodic TTL renewal of @key.
-	go func() {
-		opts := &client.SetOptions{PrevExist: client.PrevExist, TTL: ttl}
-
-		// Wait for activity either on the ticker channel or @ctx's channel.
-		for {
-			select {
-			case <-ticker.C:
-				// Update the TTL of @key.
-				_, err := ec.Set(ctx, key, val, opts)
-				if err != nil {
-					// In case of an error, put out the error info on the
-					// outward channel and return.
-					out <- err
-					close(out)
-					return
-				}
-			case <-ctx.Done():
-				// If we are here then it's indication by the caller to stop the
-				// renewal operation. So kill the ticker, delete @key, close the
-				// outward channel and return.
-				ticker.Stop()
-
-				// Deletion is best effort here and also an optimization. We end
-				// up here only when the program is being shutdown or when a
-				// catastrophic failure occurs. If we succeed in deleting @key
-				// then entities watching @key will get notified quickly or else
-				// they'll have to wait for the TTL to expire. But if we get here
-				// because of catastrophic failure then it's a best effort as the
-				// delete can also fail.
-				ec.Delete(context.Background(), key, &client.DeleteOptions{})
-				close(out)
-				wg.Done()
-				return
-			}
-		}
-	}()
-
-	return out
 }
